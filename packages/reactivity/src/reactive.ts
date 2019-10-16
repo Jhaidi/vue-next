@@ -1,3 +1,10 @@
+/*
+ * @Author: jinhaidi
+ * @Date: 2019-10-15 12:42:16
+ * @Description: reactive 函数
+ * @Description： vue3.0实现响应式的核心函数
+ * @LastEditTime: 2019-10-16 21:49:31
+ */
 import { isObject, toTypeString } from '@vue/shared'
 import { mutableHandlers, readonlyHandlers } from './baseHandlers'
 import {
@@ -13,9 +20,12 @@ import { UnwrapRef, Ref } from './ref'
 // raw Sets to reduce memory overhead.
 export type Dep = Set<ReactiveEffect>
 export type KeyToDepMap = Map<string | symbol, Dep>
+// WeakMap对象也是键值对的集合，它的键必须是对象类型，值可以是任意值。
+// WeakMap对象的一个用力是存储一个对象的私有数据和隐藏实施细节。
 export const targetMap = new WeakMap<any, KeyToDepMap>()
 
 // WeakMaps that store {raw <-> observed} pairs.
+// https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
 const rawToReactive = new WeakMap<any, any>()
 const reactiveToRaw = new WeakMap<any, any>()
 const rawToReadonly = new WeakMap<any, any>()
@@ -26,9 +36,15 @@ const readonlyToRaw = new WeakMap<any, any>()
 const readonlyValues = new WeakSet<any>()
 const nonReactiveValues = new WeakSet<any>()
 
+// https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Set
 const collectionTypes = new Set<Function>([Set, Map, WeakMap, WeakSet])
 const observableValueRE = /^\[object (?:Object|Array|Map|Set|WeakMap|WeakSet)\]$/
 
+/**
+ * @description: 是否能被Observe
+ * @param {value} 任意值
+ * @return: boolean
+ */
 const canObserve = (value: any): boolean => {
   return (
     !value._isVue &&
@@ -39,8 +55,14 @@ const canObserve = (value: any): boolean => {
 }
 
 // only unwrap nested ref
+// 仅展开嵌套引用
 type UnwrapNestedRefs<T> = T extends Ref ? T : UnwrapRef<T>
 
+/**
+ * @description: reactive
+ * @param {target} T extends object
+ * @return: UnwrapNestedRefs
+ */
 export function reactive<T extends object>(target: T): UnwrapNestedRefs<T>
 export function reactive(target: object) {
   // if trying to observe a readonly proxy, return the readonly version.
@@ -60,6 +82,11 @@ export function reactive(target: object) {
   )
 }
 
+/**
+ * @description: 只读
+ * @param {type} T extends object
+ * @return: 只读类型
+ */
 export function readonly<T extends object>(
   target: T
 ): Readonly<UnwrapNestedRefs<T>> {
@@ -77,6 +104,18 @@ export function readonly<T extends object>(
   )
 }
 
+// ProxyHandler
+// https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Proxy/handler
+
+/**
+ * @description: 创建Reactive对象
+ * @param {target} any
+ * @param {toProxy} WeakMap<any, any> 用于保存原始数据
+ * @param {toRaw} WeakMap<any, any> 用于保存可响应数据
+ * @param {baseHandlers} ProxyHandler<any>
+ * @param {collectionHandlers} ProxyHandler<any>
+ * @return:
+ */
 function createReactiveObject(
   target: any,
   toProxy: WeakMap<any, any>,
@@ -84,6 +123,7 @@ function createReactiveObject(
   baseHandlers: ProxyHandler<any>,
   collectionHandlers: ProxyHandler<any>
 ) {
+  // 如果target 不是对象
   if (!isObject(target)) {
     if (__DEV__) {
       console.warn(`value cannot be made reactive: ${String(target)}`)
@@ -91,21 +131,30 @@ function createReactiveObject(
     return target
   }
   // target already has corresponding Proxy
+  // 如果target 已经存在在相应的代理中则返回
   let observed = toProxy.get(target)
+  // 不为undefined 时返回observed
   if (observed !== void 0) {
     return observed
   }
   // target is already a Proxy
+  // 如果target已经在代理中同样返回
   if (toRaw.has(target)) {
     return target
   }
   // only a whitelist of value types can be observed.
+  // 如果target并不能被observe 则返回
   if (!canObserve(target)) {
     return target
   }
+
+  // 如果collectionTypes继承于target，handlers为collectionHandlers
+  // 不存在的话handlers为baseHandlers
   const handlers = collectionTypes.has(target.constructor)
     ? collectionHandlers
     : baseHandlers
+
+  // 创建一个Proxy对象
   observed = new Proxy(target, handlers)
   toProxy.set(target, observed)
   toRaw.set(observed, target)
@@ -115,23 +164,48 @@ function createReactiveObject(
   return observed
 }
 
+/**
+ * @description: 判断是不是Reactive
+ * @param {value} any
+ * @return: boolean
+ */
 export function isReactive(value: any): boolean {
   return reactiveToRaw.has(value) || readonlyToRaw.has(value)
 }
 
+/**
+ * @description: 是不是只读
+ * @param {value} any
+ * @return: boolean
+ */
 export function isReadonly(value: any): boolean {
   return readonlyToRaw.has(value)
 }
 
+/**
+ * @description: 获取 === get
+ * @param {observed} T
+ * @return: T
+ */
 export function toRaw<T>(observed: T): T {
   return reactiveToRaw.get(observed) || readonlyToRaw.get(observed) || observed
 }
 
+/**
+ * @description: 添加只读属性
+ * @param {value}  T
+ * @return: T
+ */
 export function markReadonly<T>(value: T): T {
   readonlyValues.add(value)
   return value
 }
 
+/**
+ * @description: 为nonReactiveValues 添加值
+ * @param {value} T
+ * @return: T
+ */
 export function markNonReactive<T>(value: T): T {
   nonReactiveValues.add(value)
   return value
