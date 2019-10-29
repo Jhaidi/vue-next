@@ -3,9 +3,9 @@
  * @Date: 2019-10-15 12:42:16
  * @Description: reactive 函数
  * @Description： vue3.0实现响应式的核心函数
- * @LastEditTime: 2019-10-16 21:49:31
+ * @LastEditTime: 2019-10-29 19:04:51
  */
-import { isObject, toTypeString } from '@vue/shared'
+import { isObject, toRawType } from '@vue/shared'
 import { mutableHandlers, readonlyHandlers } from './baseHandlers'
 import {
   mutableCollectionHandlers,
@@ -13,15 +13,14 @@ import {
 } from './collectionHandlers'
 import { ReactiveEffect } from './effect'
 import { UnwrapRef, Ref } from './ref'
+import { makeMap } from '@vue/shared'
 
 // The main WeakMap that stores {target -> key -> dep} connections.
 // Conceptually, it's easier to think of a dependency as a Dep class
 // which maintains a Set of subscribers, but we simply store them as
 // raw Sets to reduce memory overhead.
 export type Dep = Set<ReactiveEffect>
-export type KeyToDepMap = Map<string | symbol, Dep>
-// WeakMap对象也是键值对的集合，它的键必须是对象类型，值可以是任意值。
-// WeakMap对象的一个用力是存储一个对象的私有数据和隐藏实施细节。
+export type KeyToDepMap = Map<any, Dep>
 export const targetMap = new WeakMap<any, KeyToDepMap>()
 
 // WeakMaps that store {raw <-> observed} pairs.
@@ -38,7 +37,9 @@ const nonReactiveValues = new WeakSet<any>()
 
 // https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Set
 const collectionTypes = new Set<Function>([Set, Map, WeakMap, WeakSet])
-const observableValueRE = /^\[object (?:Object|Array|Map|Set|WeakMap|WeakSet)\]$/
+const isObservableType = /*#__PURE__*/ makeMap(
+  'Object,Array,Map,Set,WeakMap,WeakSet'
+)
 
 /**
  * @description: 是否能被Observe
@@ -49,7 +50,7 @@ const canObserve = (value: any): boolean => {
   return (
     !value._isVue &&
     !value._isVNode &&
-    observableValueRE.test(toTypeString(value)) &&
+    isObservableType(toRawType(value)) &&
     !nonReactiveValues.has(value)
   )
 }
@@ -117,7 +118,7 @@ export function readonly<T extends object>(
  * @return:
  */
 function createReactiveObject(
-  target: any,
+  target: unknown,
   toProxy: WeakMap<any, any>,
   toRaw: WeakMap<any, any>,
   baseHandlers: ProxyHandler<any>,
@@ -169,7 +170,7 @@ function createReactiveObject(
  * @param {value} any
  * @return: boolean
  */
-export function isReactive(value: any): boolean {
+export function isReactive(value: unknown): boolean {
   return reactiveToRaw.has(value) || readonlyToRaw.has(value)
 }
 
@@ -178,7 +179,7 @@ export function isReactive(value: any): boolean {
  * @param {value} any
  * @return: boolean
  */
-export function isReadonly(value: any): boolean {
+export function isReadonly(value: unknown): boolean {
   return readonlyToRaw.has(value)
 }
 

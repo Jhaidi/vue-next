@@ -38,13 +38,18 @@ export {
 
 // Internal, for compiler generated code
 // should sync with '@vue/compiler-core/src/runtimeConstants.ts'
-export { applyDirectives } from './directives'
-export { resolveComponent, resolveDirective } from './helpers/resolveAssets'
+export { withDirectives } from './directives'
+export {
+  resolveComponent,
+  resolveDirective,
+  resolveDynamicComponent
+} from './helpers/resolveAssets'
 export { renderList } from './helpers/renderList'
 export { toString } from './helpers/toString'
 export { toHandlers } from './helpers/toHandlers'
 export { renderSlot } from './helpers/renderSlot'
 export { createSlots } from './helpers/createSlots'
+export { setBlockTracking, createTextVNode, createCommentVNode } from './vnode'
 export { capitalize, camelize } from '@vue/shared'
 
 // Internal, for integration with runtime compiler

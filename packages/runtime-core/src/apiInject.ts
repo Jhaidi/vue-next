@@ -27,7 +27,10 @@ export function provide<T>(key: InjectionKey<T> | string, value: T) {
 
 export function inject<T>(key: InjectionKey<T> | string): T | undefined
 export function inject<T>(key: InjectionKey<T> | string, defaultValue: T): T
-export function inject(key: InjectionKey<any> | string, defaultValue?: any) {
+export function inject(
+  key: InjectionKey<any> | string,
+  defaultValue?: unknown
+) {
   if (currentInstance) {
     const provides = currentInstance.provides
     if (key in provides) {
@@ -36,7 +39,7 @@ export function inject(key: InjectionKey<any> | string, defaultValue?: any) {
     } else if (defaultValue !== undefined) {
       return defaultValue
     } else if (__DEV__) {
-      warn(`injection "${key}" not found.`)
+      warn(`injection "${String(key)}" not found.`)
     }
   } else if (__DEV__) {
     warn(`inject() can only be used inside setup().`)
