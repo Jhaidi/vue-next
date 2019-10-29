@@ -13,17 +13,17 @@ import {
   callWithAsyncErrorHandling
 } from './errorHandling'
 import { AppContext, createAppContext, AppConfig } from './apiApp'
-import { Directive } from './directives'
+import { Directive, validateDirectiveName } from './directives'
 import { applyOptions, ComponentOptions } from './apiOptions'
 import {
   EMPTY_OBJ,
   isFunction,
   capitalize,
   NOOP,
-  isArray,
   isObject,
   NO,
-  makeMap
+  makeMap,
+  isPromise
 } from '@vue/shared'
 import { SuspenseBoundary } from './suspense'
 import {
@@ -37,6 +37,7 @@ export type Data = { [key: string]: unknown }
 export interface FunctionalComponent<P = {}> {
   (props: P, ctx: SetupContext): VNodeChild
   props?: ComponentPropsOptions<P>
+  inheritAttrs?: boolean
   displayName?: string
 }
 
@@ -60,7 +61,7 @@ export const enum LifecycleHooks {
   ERROR_CAPTURED = 'ec'
 }
 
-type Emit = ((event: string, ...args: unknown[]) => void)
+export type Emit = (event: string, ...args: unknown[]) => void
 
 export interface SetupContext {
   attrs: Data
@@ -82,12 +83,17 @@ export interface ComponentInternalInstance {
   render: RenderFunction | null
   effects: ReactiveEffect[] | null
   provides: Data
+  // cache for renderProxy access type to avoid hasOwnProperty calls
+  accessCache: Data | null
+  // cache for render function values that rely on _ctx but won't need updates
+  // after initialized (e.g. inline handlers)
+  renderCache: (Function | VNode)[] | null
 
   components: Record<string, Component>
   directives: Record<string, Directive>
 
   asyncDep: Promise<any> | null
-  asyncResult: any
+  asyncResult: unknown
   asyncResolved: boolean
 
   // the rest are only for stateful components
@@ -146,6 +152,8 @@ export function createComponentInstance(
     setupContext: null,
     effects: null,
     provides: parent ? parent.provides : Object.create(appContext.provides),
+    accessCache: null!,
+    renderCache: null,
 
     // setup context properties
     renderContext: EMPTY_OBJ,
@@ -188,23 +196,12 @@ export function createComponentInstance(
       const props = instance.vnode.props || EMPTY_OBJ
       const handler = props[`on${event}`] || props[`on${capitalize(event)}`]
       if (handler) {
-        if (isArray(handler)) {
-          for (let i = 0; i < handler.length; i++) {
-            callWithAsyncErrorHandling(
-              handler[i],
-              instance,
-              ErrorCodes.COMPONENT_EVENT_HANDLER,
-              args
-            )
-          }
-        } else {
-          callWithAsyncErrorHandling(
-            handler,
-            instance,
-            ErrorCodes.COMPONENT_EVENT_HANDLER,
-            args
-          )
-        }
+        callWithAsyncErrorHandling(
+          handler,
+          instance,
+          ErrorCodes.COMPONENT_EVENT_HANDLER,
+          args
+        )
       }
     }
   }
@@ -249,12 +246,18 @@ export function setupStatefulComponent(
     if (Component.components) {
       const names = Object.keys(Component.components)
       for (let i = 0; i < names.length; i++) {
-        const name = names[i]
-        validateComponentName(name, instance.appContext.config)
+        validateComponentName(names[i], instance.appContext.config)
+      }
+    }
+    if (Component.directives) {
+      const names = Object.keys(Component.directives)
+      for (let i = 0; i < names.length; i++) {
+        validateDirectiveName(names[i])
       }
     }
   }
-
+  // 0. create render proxy property access cache
+  instance.accessCache = {}
   // 1. create render proxy
   instance.renderProxy = new Proxy(instance, PublicInstanceProxyHandlers)
   // 2. create props proxy
@@ -278,11 +281,7 @@ export function setupStatefulComponent(
     currentInstance = null
     currentSuspense = null
 
-    if (
-      setupResult &&
-      isFunction(setupResult.then) &&
-      isFunction(setupResult.catch)
-    ) {
+    if (isPromise(setupResult)) {
       if (__FEATURE_SUSPENSE__) {
         // async setup returned Promise.
         // bail here and wait for re-entry.
@@ -403,7 +402,7 @@ function finishComponentSetup(
 export const SetupProxySymbol = Symbol()
 
 const SetupProxyHandlers: { [key: string]: ProxyHandler<any> } = {}
-;['attrs', 'slots', 'refs'].forEach((type: string) => {
+;['attrs', 'slots'].forEach((type: string) => {
   SetupProxyHandlers[type] = {
     get: (instance, key) => instance[type][key],
     has: (instance, key) => key === SetupProxySymbol || key in instance[type],
@@ -418,12 +417,11 @@ const SetupProxyHandlers: { [key: string]: ProxyHandler<any> } = {}
 
 function createSetupContext(instance: ComponentInternalInstance): SetupContext {
   const context = {
-    // attrs, slots & refs are non-reactive, but they need to always expose
+    // attrs & slots are non-reactive, but they need to always expose
     // the latest values (instance.xxx may get replaced during updates) so we
     // need to expose them through a proxy
     attrs: new Proxy(instance, SetupProxyHandlers.attrs),
     slots: new Proxy(instance, SetupProxyHandlers.slots),
-    refs: new Proxy(instance, SetupProxyHandlers.refs),
     emit: instance.emit
   }
   return __DEV__ ? Object.freeze(context) : context

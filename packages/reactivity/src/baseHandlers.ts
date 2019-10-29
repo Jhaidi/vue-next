@@ -2,7 +2,7 @@ import { reactive, readonly, toRaw } from './reactive'
 import { OperationTypes } from './operations'
 import { track, trigger } from './effect'
 import { LOCKED } from './lock'
-import { isObject, hasOwn, isSymbol } from '@vue/shared'
+import { isObject, hasOwn, isSymbol, hasChanged } from '@vue/shared'
 import { isRef } from './ref'
 
 const builtInSymbols = new Set(
@@ -12,7 +12,7 @@ const builtInSymbols = new Set(
 )
 
 function createGetter(isReadonly: boolean) {
-  return function get(target: any, key: string | symbol, receiver: any) {
+  return function get(target: object, key: string | symbol, receiver: object) {
     const res = Reflect.get(target, key, receiver)
     if (isSymbol(key) && builtInSymbols.has(key)) {
       return res
@@ -32,13 +32,13 @@ function createGetter(isReadonly: boolean) {
 }
 
 function set(
-  target: any,
+  target: object,
   key: string | symbol,
-  value: any,
-  receiver: any
+  value: unknown,
+  receiver: object
 ): boolean {
   value = toRaw(value)
-  const oldValue = target[key]
+  const oldValue = (target as any)[key]
   if (isRef(oldValue) && !isRef(value)) {
     oldValue.value = value
     return true
@@ -52,13 +52,13 @@ function set(
       const extraInfo = { oldValue, newValue: value }
       if (!hadKey) {
         trigger(target, OperationTypes.ADD, key, extraInfo)
-      } else if (value !== oldValue) {
+      } else if (hasChanged(value, oldValue)) {
         trigger(target, OperationTypes.SET, key, extraInfo)
       }
     } else {
       if (!hadKey) {
         trigger(target, OperationTypes.ADD, key)
-      } else if (value !== oldValue) {
+      } else if (hasChanged(value, oldValue)) {
         trigger(target, OperationTypes.SET, key)
       }
     }
@@ -66,9 +66,9 @@ function set(
   return result
 }
 
-function deleteProperty(target: any, key: string | symbol): boolean {
+function deleteProperty(target: object, key: string | symbol): boolean {
   const hadKey = hasOwn(target, key)
-  const oldValue = target[key]
+  const oldValue = (target as any)[key]
   const result = Reflect.deleteProperty(target, key)
   if (result && hadKey) {
     /* istanbul ignore else */
@@ -81,18 +81,18 @@ function deleteProperty(target: any, key: string | symbol): boolean {
   return result
 }
 
-function has(target: any, key: string | symbol): boolean {
+function has(target: object, key: string | symbol): boolean {
   const result = Reflect.has(target, key)
   track(target, OperationTypes.HAS, key)
   return result
 }
 
-function ownKeys(target: any): (string | number | symbol)[] {
+function ownKeys(target: object): (string | number | symbol)[] {
   track(target, OperationTypes.ITERATE)
   return Reflect.ownKeys(target)
 }
 
-export const mutableHandlers: ProxyHandler<any> = {
+export const mutableHandlers: ProxyHandler<object> = {
   get: createGetter(false),
   set,
   deleteProperty,
@@ -100,10 +100,15 @@ export const mutableHandlers: ProxyHandler<any> = {
   ownKeys
 }
 
-export const readonlyHandlers: ProxyHandler<any> = {
+export const readonlyHandlers: ProxyHandler<object> = {
   get: createGetter(true),
 
-  set(target: any, key: string | symbol, value: any, receiver: any): boolean {
+  set(
+    target: object,
+    key: string | symbol,
+    value: unknown,
+    receiver: object
+  ): boolean {
     if (LOCKED) {
       if (__DEV__) {
         console.warn(
@@ -117,7 +122,7 @@ export const readonlyHandlers: ProxyHandler<any> = {
     }
   },
 
-  deleteProperty(target: any, key: string | symbol): boolean {
+  deleteProperty(target: object, key: string | symbol): boolean {
     if (LOCKED) {
       if (__DEV__) {
         console.warn(

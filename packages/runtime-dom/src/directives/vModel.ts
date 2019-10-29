@@ -35,7 +35,9 @@ function toNumber(val: string): number | string {
 
 // We are exporting the v-model runtime directly as vnode hooks so that it can
 // be tree-shaken in case v-model is never used.
-export const vModelText: ObjectDirective<HTMLInputElement | HTMLTextAreaElement> = {
+export const vModelText: ObjectDirective<
+  HTMLInputElement | HTMLTextAreaElement
+> = {
   beforeMount(el, { value, modifiers: { lazy, trim, number } }, vnode) {
     el.value = value
     const assign = getModelAssigner(vnode)
@@ -64,7 +66,10 @@ export const vModelText: ObjectDirective<HTMLInputElement | HTMLTextAreaElement>
       addEventListener(el, 'change', onCompositionEnd)
     }
   },
-  beforeUpdate(el, { value, modifiers: { trim, number } }) {
+  beforeUpdate(el, { value, oldValue, modifiers: { trim, number } }) {
+    if (value === oldValue) {
+      return
+    }
     if (document.activeElement === el) {
       if (trim && el.value.trim() === value) {
         return
@@ -105,15 +110,17 @@ export const vModelCheckbox: ObjectDirective<HTMLInputElement> = {
 
 function setChecked(
   el: HTMLInputElement,
-  { value }: DirectiveBinding,
+  { value, oldValue }: DirectiveBinding,
   vnode: VNode
 ) {
   // store the v-model value on the element so it can be accessed by the
   // change listener.
   ;(el as any)._modelValue = value
-  el.checked = isArray(value)
-    ? looseIndexOf(value, vnode.props!.value) > -1
-    : !!value
+  if (isArray(value)) {
+    el.checked = looseIndexOf(value, vnode.props!.value) > -1
+  } else if (value !== oldValue) {
+    el.checked = !!value
+  }
 }
 
 export const vModelRadio: ObjectDirective<HTMLInputElement> = {
@@ -124,8 +131,10 @@ export const vModelRadio: ObjectDirective<HTMLInputElement> = {
       assign(getValue(el))
     })
   },
-  beforeUpdate(el, { value }, vnode) {
-    el.checked = looseEqual(value, vnode.props!.value)
+  beforeUpdate(el, { value, oldValue }, vnode) {
+    if (value !== oldValue) {
+      el.checked = looseEqual(value, vnode.props!.value)
+    }
   }
 }
 

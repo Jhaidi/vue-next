@@ -14,7 +14,8 @@ import {
   createComponentInstance,
   setupStatefulComponent,
   handleSetupResult,
-  Component
+  Component,
+  Data
 } from './component'
 import {
   renderComponentRoot,
@@ -36,7 +37,8 @@ import {
   ReactiveEffectOptions,
   isRef,
   Ref,
-  toRaw
+  toRaw,
+  DebuggerEvent
 } from '@vue/reactivity'
 import { resolveProps } from './componentProps'
 import { resolveSlots } from './componentSlots'
@@ -50,7 +52,7 @@ import {
   createSuspenseBoundary,
   normalizeSuspenseChildren
 } from './suspense'
-import { handleError, ErrorCodes } from './errorHandling'
+import { handleError, ErrorCodes, callWithErrorHandling } from './errorHandling'
 
 const prodEffectOptions = {
   scheduler: queueJob
@@ -70,7 +72,7 @@ function isSameType(n1: VNode, n2: VNode): boolean {
   return n1.type === n2.type && n1.key === n2.key
 }
 
-function invokeHooks(hooks: Function[], arg?: any) {
+function invokeHooks(hooks: Function[], arg?: DebuggerEvent) {
   for (let i = 0; i < hooks.length; i++) {
     hooks[i](arg)
   }
@@ -121,7 +123,7 @@ export interface RendererOptions<HostNode = any, HostElement = any> {
 
 export type RootRenderFunction<HostNode, HostElement> = (
   vnode: VNode<HostNode, HostElement> | null,
-  dom: HostElement | string
+  dom: HostElement
 ) => void
 
 /**
@@ -177,15 +179,10 @@ export function createRenderer<
     optimized: boolean = false
   ) {
     // patching & not same type, unmount old tree
-    if (n1 != null) {
-      if (!isSameType(n1, n2)) {
-        anchor = getNextHostNode(n1)
-        unmount(n1, parentComponent, parentSuspense, true)
-        n1 = null
-      } else if (n1.props && n1.props.$once) {
-        console.log(111)
-        return
-      }
+    if (n1 != null && !isSameType(n1, n2)) {
+      anchor = getNextHostNode(n1)
+      unmount(n1, parentComponent, parentSuspense, true)
+      n1 = null
     }
 
     const { type, shapeFlag } = n2
@@ -320,7 +317,8 @@ export function createRenderer<
         anchor,
         parentComponent,
         parentSuspense,
-        isSVG
+        isSVG,
+        optimized
       )
     } else {
       patchElement(n1, n2, parentComponent, parentSuspense, isSVG, optimized)
@@ -336,7 +334,8 @@ export function createRenderer<
     anchor: HostNode | null,
     parentComponent: ComponentInternalInstance | null,
     parentSuspense: HostSuspenseBoundary | null,
-    isSVG: boolean
+    isSVG: boolean,
+    optimized: boolean
   ) {
     const tag = vnode.type as string
     isSVG = isSVG || tag === 'svg'
@@ -347,8 +346,8 @@ export function createRenderer<
         if (isReservedProp(key)) continue
         hostPatchProp(el, key, props[key], null, isSVG)
       }
-      if (props.vnodeBeforeMount != null) {
-        invokeDirectiveHook(props.vnodeBeforeMount, parentComponent, vnode)
+      if (props.onVnodeBeforeMount != null) {
+        invokeDirectiveHook(props.onVnodeBeforeMount, parentComponent, vnode)
       }
     }
     if (shapeFlag & ShapeFlags.TEXT_CHILDREN) {
@@ -360,13 +359,14 @@ export function createRenderer<
         null,
         parentComponent,
         parentSuspense,
-        isSVG
+        isSVG,
+        optimized || vnode.dynamicChildren !== null
       )
     }
     hostInsert(el, container, anchor)
-    if (props != null && props.vnodeMounted != null) {
+    if (props != null && props.onVnodeMounted != null) {
       queuePostRenderEffect(() => {
-        invokeDirectiveHook(props.vnodeMounted, parentComponent, vnode)
+        invokeDirectiveHook(props.onVnodeMounted, parentComponent, vnode)
       }, parentSuspense)
     }
   }
@@ -378,10 +378,13 @@ export function createRenderer<
     parentComponent: ComponentInternalInstance | null,
     parentSuspense: HostSuspenseBoundary | null,
     isSVG: boolean,
+    optimized: boolean,
     start: number = 0
   ) {
     for (let i = start; i < children.length; i++) {
-      const child = (children[i] = normalizeVNode(children[i]))
+      const child = optimized
+        ? (children[i] as HostVNode)
+        : (children[i] = normalizeVNode(children[i]))
       patch(
         null,
         child,
@@ -389,7 +392,8 @@ export function createRenderer<
         anchor,
         parentComponent,
         parentSuspense,
-        isSVG
+        isSVG,
+        optimized
       )
     }
   }
@@ -407,8 +411,8 @@ export function createRenderer<
     const oldProps = (n1 && n1.props) || EMPTY_OBJ
     const newProps = n2.props || EMPTY_OBJ
 
-    if (newProps.vnodeBeforeUpdate != null) {
-      invokeDirectiveHook(newProps.vnodeBeforeUpdate, parentComponent, n2, n1)
+    if (newProps.onVnodeBeforeUpdate != null) {
+      invokeDirectiveHook(newProps.onVnodeBeforeUpdate, parentComponent, n2, n1)
     }
 
     if (patchFlag > 0) {
@@ -482,7 +486,7 @@ export function createRenderer<
         }
         return // terminal
       }
-    } else if (!optimized) {
+    } else if (!optimized && dynamicChildren == null) {
       // unoptimized, full diff
       patchProps(
         el,
@@ -496,42 +500,61 @@ export function createRenderer<
     }
 
     if (dynamicChildren != null) {
-      // children fast path
-      const oldDynamicChildren = n1.dynamicChildren!
-      for (let i = 0; i < dynamicChildren.length; i++) {
-        const oldVNode = oldDynamicChildren[i]
-        patch(
-          oldVNode,
-          dynamicChildren[i],
-          // in the case of a Fragment, we need to provide the actual parent
-          // of the Fragment itself so it can move its children. In other cases,
-          // the parent container is not actually used so we just pass the
-          // block element here to avoid a DOM parentNode call.
-          oldVNode.type === Fragment ? hostParentNode(oldVNode.el!)! : el,
-          null,
-          parentComponent,
-          parentSuspense,
-          isSVG,
-          true
-        )
-      }
+      patchBlockChildren(
+        n1.dynamicChildren!,
+        dynamicChildren,
+        el,
+        parentComponent,
+        parentSuspense,
+        isSVG
+      )
     } else if (!optimized) {
       // full diff
       patchChildren(n1, n2, el, null, parentComponent, parentSuspense, isSVG)
     }
 
-    if (newProps.vnodeUpdated != null) {
+    if (newProps.onVnodeUpdated != null) {
       queuePostRenderEffect(() => {
-        invokeDirectiveHook(newProps.vnodeUpdated, parentComponent, n2, n1)
+        invokeDirectiveHook(newProps.onVnodeUpdated, parentComponent, n2, n1)
       }, parentSuspense)
+    }
+  }
+
+  // The fast path for blocks.
+  function patchBlockChildren(
+    oldChildren: HostVNode[],
+    newChildren: HostVNode[],
+    fallbackContainer: HostElement,
+    parentComponent: ComponentInternalInstance | null,
+    parentSuspense: HostSuspenseBoundary | null,
+    isSVG: boolean
+  ) {
+    for (let i = 0; i < newChildren.length; i++) {
+      const oldVNode = oldChildren[i]
+      patch(
+        oldVNode,
+        newChildren[i],
+        // in the case of a Fragment, we need to provide the actual parent
+        // of the Fragment itself so it can move its children. In other cases,
+        // the parent container is not actually used so we just pass the
+        // block element here to avoid a DOM parentNode call.
+        oldVNode.type === Fragment
+          ? hostParentNode(oldVNode.el!)!
+          : fallbackContainer,
+        null,
+        parentComponent,
+        parentSuspense,
+        isSVG,
+        true
+      )
     }
   }
 
   function patchProps(
     el: HostElement,
     vnode: HostVNode,
-    oldProps: any,
-    newProps: any,
+    oldProps: Data,
+    newProps: Data,
     parentComponent: ComponentInternalInstance | null,
     parentSuspense: HostSuspenseBoundary | null,
     isSVG: boolean
@@ -602,7 +625,8 @@ export function createRenderer<
         fragmentEndAnchor,
         parentComponent,
         parentSuspense,
-        isSVG
+        isSVG,
+        optimized
       )
     } else {
       patchChildren(
@@ -633,7 +657,7 @@ export function createRenderer<
     if (n1 == null) {
       const target = (n2.target = isString(targetSelector)
         ? hostQuerySelector(targetSelector)
-        : null)
+        : targetSelector)
       if (target != null) {
         if (shapeFlag & ShapeFlags.TEXT_CHILDREN) {
           hostSetElementText(target, children as string)
@@ -644,7 +668,8 @@ export function createRenderer<
             null,
             parentComponent,
             parentSuspense,
-            isSVG
+            isSVG,
+            optimized
           )
         }
       } else if (__DEV__) {
@@ -655,6 +680,16 @@ export function createRenderer<
       const target = (n2.target = n1.target)!
       if (patchFlag === PatchFlags.TEXT) {
         hostSetElementText(target, children as string)
+      } else if (n2.dynamicChildren) {
+        // fast path when the portal happens to be a block root
+        patchBlockChildren(
+          n1.dynamicChildren!,
+          n2.dynamicChildren,
+          container,
+          parentComponent,
+          parentSuspense,
+          isSVG
+        )
       } else if (!optimized) {
         patchChildren(
           n1,
@@ -1309,7 +1344,8 @@ export function createRenderer<
             anchor,
             parentComponent,
             parentSuspense,
-            isSVG
+            isSVG,
+            optimized
           )
         }
       }
@@ -1333,7 +1369,9 @@ export function createRenderer<
     const commonLength = Math.min(oldLength, newLength)
     let i
     for (i = 0; i < commonLength; i++) {
-      const nextChild = (c2[i] = normalizeVNode(c2[i]))
+      const nextChild = optimized
+        ? (c2[i] as HostVNode)
+        : (c2[i] = normalizeVNode(c2[i]))
       patch(
         c1[i],
         nextChild,
@@ -1357,6 +1395,7 @@ export function createRenderer<
         parentComponent,
         parentSuspense,
         isSVG,
+        optimized,
         commonLength
       )
     }
@@ -1383,7 +1422,9 @@ export function createRenderer<
     // (a b) d e
     while (i <= e1 && i <= e2) {
       const n1 = c1[i]
-      const n2 = (c2[i] = normalizeVNode(c2[i]))
+      const n2 = optimized
+        ? (c2[i] as HostVNode)
+        : (c2[i] = normalizeVNode(c2[i]))
       if (isSameType(n1, n2)) {
         patch(
           n1,
@@ -1406,7 +1447,9 @@ export function createRenderer<
     // d e (b c)
     while (i <= e1 && i <= e2) {
       const n1 = c1[e1]
-      const n2 = (c2[e2] = normalizeVNode(c2[e2]))
+      const n2 = optimized
+        ? (c2[i] as HostVNode)
+        : (c2[e2] = normalizeVNode(c2[e2]))
       if (isSameType(n1, n2)) {
         patch(
           n1,
@@ -1440,7 +1483,7 @@ export function createRenderer<
         while (i <= e2) {
           patch(
             null,
-            (c2[i] = normalizeVNode(c2[i])),
+            optimized ? (c2[i] as HostVNode) : (c2[i] = normalizeVNode(c2[i])),
             container,
             anchor,
             parentComponent,
@@ -1477,7 +1520,9 @@ export function createRenderer<
       // 5.1 build key:index map for newChildren
       const keyToNewIndexMap: Map<string | number, number> = new Map()
       for (i = s2; i <= e2; i++) {
-        const nextChild = (c2[i] = normalizeVNode(c2[i]))
+        const nextChild = optimized
+          ? (c2[i] as HostVNode)
+          : (c2[i] = normalizeVNode(c2[i]))
         if (nextChild.key != null) {
           if (__DEV__ && keyToNewIndexMap.has(nextChild.key)) {
             warn(
@@ -1503,8 +1548,8 @@ export function createRenderer<
       // and oldIndex = 0 is a special value indicating the new node has
       // no corresponding old node.
       // used for determining longest stable subsequence
-      const newIndexToOldIndexMap = []
-      for (i = 0; i < toBePatched; i++) newIndexToOldIndexMap.push(0)
+      const newIndexToOldIndexMap = new Array(toBePatched)
+      for (i = 0; i < toBePatched; i++) newIndexToOldIndexMap[i] = 0
 
       for (i = s1; i <= e1; i++) {
         const prevChild = c1[i]
@@ -1654,8 +1699,8 @@ export function createRenderer<
       return
     }
 
-    if (props != null && props.vnodeBeforeUnmount != null) {
-      invokeDirectiveHook(props.vnodeBeforeUnmount, parentComponent, vnode)
+    if (props != null && props.onVnodeBeforeUnmount != null) {
+      invokeDirectiveHook(props.onVnodeBeforeUnmount, parentComponent, vnode)
     }
 
     const shouldRemoveChildren = type === Fragment && doRemove
@@ -1680,9 +1725,9 @@ export function createRenderer<
       if (anchor != null) hostRemove(anchor)
     }
 
-    if (props != null && props.vnodeUnmounted != null) {
+    if (props != null && props.onVnodeUnmounted != null) {
       queuePostRenderEffect(() => {
-        invokeDirectiveHook(props.vnodeUnmounted, parentComponent, vnode)
+        invokeDirectiveHook(props.onVnodeUnmounted, parentComponent, vnode)
       }, parentSuspense)
     }
   }
@@ -1807,25 +1852,18 @@ export function createRenderer<
     } else if (isRef(ref)) {
       ref.value = value
     } else if (isFunction(ref)) {
-      ref(value, refs)
+      callWithErrorHandling(ref, parent, ErrorCodes.FUNCTION_REF, [value, refs])
     } else if (__DEV__) {
       warn('Invalid template ref type:', value, `(${typeof value})`)
     }
   }
 
-  function render(vnode: HostVNode | null, rawContainer: HostElement | string) {
-    let container: any = rawContainer
-    if (isString(container)) {
-      container = hostQuerySelector(container)
-      if (!container) {
-        if (__DEV__) {
-          warn(
-            `Failed to locate root container: ` + `querySelector returned null.`
-          )
-        }
-        return
-      }
+  const render: RootRenderFunction<
+    HostNode,
+    HostElement & {
+      _vnode: HostVNode | null
     }
+  > = (vnode, container) => {
     if (vnode == null) {
       if (container._vnode) {
         unmount(container._vnode, null, null, true)
