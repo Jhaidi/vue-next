@@ -47,8 +47,10 @@ function set(
   const hadKey = hasOwn(target, key)
   const result = Reflect.set(target, key, value, receiver)
   // don't trigger if target is something up in the prototype chain of original
+  // 在reactive维护了一个reactiveToRaw队列，存储了[proxy]:[target]这样的队列，这里检测下是否是使用createReactiveObject新建的proxy
   if (target === toRaw(receiver)) {
     /* istanbul ignore else */
+    // 判断是否值改变，才触发更新
     if (__DEV__) {
       const extraInfo = { oldValue, newValue: value }
       if (!hadKey) {
@@ -94,8 +96,11 @@ function ownKeys(target: object): (string | number | symbol)[] {
 }
 
 export const mutableHandlers: ProxyHandler<object> = {
+  // 数据收集
   get: createGetter(false),
+  // 数据变化 ==> 广播
   set,
+  // 删除
   deleteProperty,
   has,
   ownKeys

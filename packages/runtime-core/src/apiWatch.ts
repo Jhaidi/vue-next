@@ -153,12 +153,15 @@ function doWatch(
         if (instance && instance.isUnmounted) {
           return
         }
+        // 获取最新值
         const newValue = runner()
+        // 转发回调函数
         if (deep || hasChanged(newValue, oldValue)) {
           // cleanup before running cb again
           if (cleanup) {
             cleanup()
           }
+          // 这里函数可以是普通函数也可以是Promise
           callWithAsyncErrorHandling(cb, instance, ErrorCodes.WATCH_CALLBACK, [
             newValue,
             oldValue,

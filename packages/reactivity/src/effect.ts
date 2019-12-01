@@ -41,6 +41,7 @@ export function isEffect(fn: any): fn is ReactiveEffect {
   return fn != null && fn._isEffect === true
 }
 
+// 初始化effect
 export function effect<T = any>(
   fn: () => T,
   options: ReactiveEffectOptions = EMPTY_OBJ
@@ -65,6 +66,7 @@ export function stop(effect: ReactiveEffect) {
   }
 }
 
+// 创建一个effect
 function createReactiveEffect<T = any>(
   fn: () => T,
   options: ReactiveEffectOptions
@@ -80,6 +82,8 @@ function createReactiveEffect<T = any>(
   return effect
 }
 
+// 执行函数，执行完之后会将储存的 effect 删除
+// 这是函数 effect 的所有执行，所经历的完整的声明周期
 function run(effect: ReactiveEffect, fn: Function, args: unknown[]): unknown {
   if (!effect.active) {
     return fn(...args)
@@ -115,6 +119,7 @@ export function resumeTracking() {
   shouldTrack = true
 }
 
+// 数据依赖收集
 export function track(target: object, type: OperationTypes, key?: unknown) {
   if (!shouldTrack || effectStack.length === 0) {
     return
@@ -145,6 +150,7 @@ export function track(target: object, type: OperationTypes, key?: unknown) {
   }
 }
 
+// 数据变化时 ==> 更新广播
 export function trigger(
   target: object,
   type: OperationTypes,
