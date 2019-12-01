@@ -3,10 +3,14 @@
  * @Date: 2019-10-15 12:42:16
  * @Description: reactive 函数
  * @Description： vue3.0实现响应式的核心函数
- * @LastEditTime: 2019-10-29 19:04:51
+ * @LastEditTime: 2019-12-01 11:21:05
  */
 import { isObject, toRawType } from '@vue/shared'
-import { mutableHandlers, readonlyHandlers } from './baseHandlers'
+import {
+  mutableHandlers,
+  readonlyHandlers,
+  readonlyPropsHandlers
+} from './baseHandlers'
 import {
   mutableCollectionHandlers,
   readonlyCollectionHandlers
@@ -117,6 +121,23 @@ export function readonly<T extends object>(
  * @param {collectionHandlers} ProxyHandler<any>
  * @return:
  */
+// @internal
+// Return a readonly-copy of a props object, without unwrapping refs at the root
+// level. This is intended to allow explicitly passing refs as props.
+// Technically this should use different global cache from readonly(), but
+// since it is only used on internal objects so it's not really necessary.
+export function readonlyProps<T extends object>(
+  target: T
+): Readonly<{ [K in keyof T]: UnwrapNestedRefs<T[K]> }> {
+  return createReactiveObject(
+    target,
+    rawToReadonly,
+    readonlyToRaw,
+    readonlyPropsHandlers,
+    readonlyCollectionHandlers
+  )
+}
+
 function createReactiveObject(
   target: unknown,
   toProxy: WeakMap<any, any>,

@@ -244,6 +244,7 @@ describe('api: createApp', () => {
     const PluginB: Plugin = {
       install: app => app.provide('bar', 2)
     }
+    const PluginC: any = undefined
 
     const app = createApp()
     app.use(PluginA)
@@ -259,6 +260,17 @@ describe('api: createApp', () => {
     const root = nodeOps.createElement('div')
     app.mount(Root, root)
     expect(serializeInner(root)).toBe(`1,2`)
+
+    app.use(PluginA)
+    expect(
+      `Plugin has already been applied to target app`
+    ).toHaveBeenWarnedTimes(1)
+
+    app.use(PluginC)
+    expect(
+      `A plugin must either be a function or an object with an "install" ` +
+        `function.`
+    ).toHaveBeenWarnedTimes(1)
   })
 
   test('config.errorHandler', () => {
