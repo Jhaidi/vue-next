@@ -4,8 +4,9 @@ import {
   h,
   render,
   nextTick,
-  Ref,
-  createComponent
+  defineComponent,
+  reactive,
+  serializeInner
 } from '@vue/runtime-test'
 
 // reference: https://vue-composition-api-rfc.netlify.com/api.html#template-refs
@@ -83,7 +84,7 @@ describe('api: template refs', () => {
     const root = nodeOps.createElement('div')
     const fn = jest.fn()
 
-    const Comp = createComponent(() => () => h('div', { ref: fn }))
+    const Comp = defineComponent(() => () => h('div', { ref: fn }))
     render(h(Comp), root)
     expect(fn.mock.calls[0][0]).toBe(root.children[0])
   })
@@ -94,7 +95,7 @@ describe('api: template refs', () => {
     const fn2 = jest.fn()
     const fn = ref(fn1)
 
-    const Comp = createComponent(() => () => h('div', { ref: fn.value }))
+    const Comp = defineComponent(() => () => h('div', { ref: fn.value }))
 
     render(h(Comp), root)
     expect(fn1.mock.calls).toHaveLength(1)
@@ -113,7 +114,7 @@ describe('api: template refs', () => {
     const fn = jest.fn()
     const toggle = ref(true)
 
-    const Comp = createComponent(() => () =>
+    const Comp = defineComponent(() => () =>
       toggle.value ? h('div', { ref: fn }) : null
     )
     render(h(Comp), root)
@@ -142,7 +143,7 @@ describe('api: template refs', () => {
       foo: ref(null),
       bar: ref(null)
     }
-    const refKey: Ref<keyof typeof refs> = ref('foo')
+    const refKey = ref<keyof typeof refs>('foo')
 
     const Comp = {
       setup() {
@@ -175,5 +176,96 @@ describe('api: template refs', () => {
     toggle.value = false
     await nextTick()
     expect(el.value).toBe(null)
+  })
+
+  test('string ref inside slots', async () => {
+    const root = nodeOps.createElement('div')
+    const spy = jest.fn()
+    const Child = {
+      render(this: any) {
+        return this.$slots.default()
+      }
+    }
+
+    const Comp = {
+      render() {
+        return h(Child, () => {
+          return h('div', { ref: 'foo' })
+        })
+      },
+      mounted(this: any) {
+        spy(this.$refs.foo.tag)
+      }
+    }
+    render(h(Comp), root)
+
+    expect(spy).toHaveBeenCalledWith('div')
+  })
+
+  it('should work with direct reactive property', () => {
+    const root = nodeOps.createElement('div')
+    const state = reactive({
+      refKey: null
+    })
+
+    const Comp = {
+      setup() {
+        return state
+      },
+      render() {
+        return h('div', { ref: 'refKey' })
+      }
+    }
+    render(h(Comp), root)
+    expect(state.refKey).toBe(root.children[0])
+  })
+
+  test('multiple root refs', () => {
+    const root = nodeOps.createElement('div')
+    const refKey1 = ref(null)
+    const refKey2 = ref(null)
+    const refKey3 = ref(null)
+
+    const Comp = {
+      setup() {
+        return {
+          refKey1,
+          refKey2,
+          refKey3
+        }
+      },
+      render() {
+        return [
+          h('div', { ref: 'refKey1' }),
+          h('div', { ref: 'refKey2' }),
+          h('div', { ref: 'refKey3' })
+        ]
+      }
+    }
+    render(h(Comp), root)
+    expect(refKey1.value).toBe(root.children[1])
+    expect(refKey2.value).toBe(root.children[2])
+    expect(refKey3.value).toBe(root.children[3])
+  })
+
+  // #1505
+  test('reactive template ref in the same template', async () => {
+    const Comp = {
+      setup() {
+        const el = ref()
+        return { el }
+      },
+      render(this: any) {
+        return h('div', { id: 'foo', ref: 'el' }, this.el && this.el.props.id)
+      }
+    }
+
+    const root = nodeOps.createElement('div')
+    render(h(Comp), root)
+    // ref not ready on first render, but should queue an update immediately
+    expect(serializeInner(root)).toBe(`<div id="foo"></div>`)
+    await nextTick()
+    // ref should be updated
+    expect(serializeInner(root)).toBe(`<div id="foo">foo</div>`)
   })
 })

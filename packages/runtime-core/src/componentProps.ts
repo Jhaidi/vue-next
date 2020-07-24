@@ -1,4 +1,9 @@
-import { toRaw, lock, unlock } from '@vue/reactivity'
+import {
+  toRaw,
+  shallowReactive,
+  trigger,
+  TriggerOpTypes
+} from '@vue/reactivity'
 import {
   EMPTY_OBJ,
   camelize,
@@ -11,10 +16,21 @@ import {
   hasOwn,
   toRawType,
   PatchFlags,
-  makeMap
+  makeMap,
+  isReservedProp,
+  EMPTY_ARR,
+  def,
+  extend
 } from '@vue/shared'
 import { warn } from './warning'
-import { Data, ComponentInternalInstance } from './component'
+import {
+  Data,
+  ComponentInternalInstance,
+  ComponentOptions,
+  Component
+} from './component'
+import { isEmitListener } from './componentEmits'
+import { InternalObjectKey } from './vnode'
 
 export type ComponentPropsOptions<P = Data> =
   | ComponentObjectPropsOptions<P>
@@ -37,7 +53,14 @@ interface PropOptions<T = any> {
 
 export type PropType<T> = PropConstructor<T> | PropConstructor<T>[]
 
-type PropConstructor<T = any> = { new (...args: any[]): T & object } | { (): T }
+type PropConstructor<T = any> =
+  | { new (...args: any[]): T & object }
+  | { (): T }
+  | PropMethod<T>
+
+type PropMethod<T, TConstructor = any> = T extends (...args: any) => any // if is function with args
+  ? { new (): TConstructor; (): T; readonly prototype: TConstructor } // Create Function like constructor
+  : never
 
 type RequiredKeys<T, MakeDefaultRequired> = {
   [K in keyof T]: T[K] extends
@@ -55,10 +78,12 @@ type OptionalKeys<T, MakeDefaultRequired> = Exclude<
 type InferPropType<T> = T extends null
   ? any // null & true would fail to infer
   : T extends { type: null | true }
-    ? any // somehow `ObjectConstructor` when inferred from { (): T } becomes `any`
+    ? any // As TS issue https://github.com/Microsoft/TypeScript/issues/14829 // somehow `ObjectConstructor` when inferred from { (): T } becomes `any` // `BooleanConstructor` when inferred from PropConstructor(with PropMethod) becomes `Boolean`
     : T extends ObjectConstructor | { type: ObjectConstructor }
-      ? { [key: string]: any }
-      : T extends Prop<infer V> ? V : T
+      ? Record<string, any>
+      : T extends BooleanConstructor | { type: BooleanConstructor }
+        ? boolean
+        : T extends Prop<infer V> ? V : T
 
 export type ExtractPropTypes<
   O,
@@ -80,170 +105,280 @@ type NormalizedProp =
       [BooleanFlags.shouldCastTrue]?: boolean
     })
 
-type NormalizedPropsOptions = Record<string, NormalizedProp>
+// normalized value is a tuple of the actual normalized options
+// and an array of prop keys that need value casting (booleans and defaults)
+export type NormalizedPropsOptions = [Record<string, NormalizedProp>, string[]]
 
-// resolve raw VNode data.
-// - filter out reserved keys (key, ref, slots)
-// - extract class and style into $attrs (to be merged onto child
-//   component root)
-// - for the rest:
-//   - if has declared props: put declared ones in `props`, the rest in `attrs`
-//   - else: everything goes in `props`.
-
-export function resolveProps(
+export function initProps(
   instance: ComponentInternalInstance,
   rawProps: Data | null,
-  _options: ComponentPropsOptions | void
+  isStateful: number, // result of bitwise flag comparison
+  isSSR = false
 ) {
-  const hasDeclaredProps = _options != null
-  const options = normalizePropsOptions(_options)!
-  if (!rawProps && !hasDeclaredProps) {
-    return
+  const props: Data = {}
+  const attrs: Data = {}
+  def(attrs, InternalObjectKey, 1)
+  setFullProps(instance, rawProps, props, attrs)
+  // validation
+  if (__DEV__) {
+    validateProps(props, instance.type)
   }
 
-  const props: Data = {}
-  let attrs: Data | undefined = void 0
-
-  // update the instance propsProxy (passed to setup()) to trigger potential
-  // changes
-  const propsProxy = instance.propsProxy
-  const setProp = propsProxy
-    ? (key: string, val: unknown) => {
-        props[key] = val
-        propsProxy[key] = val
-      }
-    : (key: string, val: unknown) => {
-        props[key] = val
-      }
-
-  // allow mutation of propsProxy (which is readonly by default)
-  unlock()
-
-  if (rawProps != null) {
-    for (const key in rawProps) {
-      // key, ref are reserved and never passed down
-      if (key === 'key' || key === 'ref') continue
-      // prop option names are camelized during normalization, so to support
-      // kebab -> camel conversion here we need to camelize the key.
-      const camelKey = camelize(key)
-      if (hasDeclaredProps && !hasOwn(options, camelKey)) {
-        // Any non-declared props are put into a separate `attrs` object
-        // for spreading. Make sure to preserve original key casing
-        ;(attrs || (attrs = {}))[key] = rawProps[key]
-      } else {
-        setProp(camelKey, rawProps[key])
-      }
+  if (isStateful) {
+    // stateful
+    instance.props = isSSR ? props : shallowReactive(props)
+  } else {
+    if (!instance.type.props) {
+      // functional w/ optional props, props === attrs
+      instance.props = attrs
+    } else {
+      // functional w/ declared props
+      instance.props = props
     }
   }
-  // set default values, cast booleans & run validators
-  if (hasDeclaredProps) {
-    for (const key in options) {
-      let opt = options[key]
-      if (opt == null) continue
-      const isAbsent = !hasOwn(props, key)
-      const hasDefault = hasOwn(opt, 'default')
-      const currentValue = props[key]
-      // default values
-      if (hasDefault && currentValue === undefined) {
-        const defaultValue = opt.default
-        setProp(key, isFunction(defaultValue) ? defaultValue() : defaultValue)
-      }
-      // boolean casting
-      if (opt[BooleanFlags.shouldCast]) {
-        if (isAbsent && !hasDefault) {
-          setProp(key, false)
-        } else if (
-          opt[BooleanFlags.shouldCastTrue] &&
-          (currentValue === '' || currentValue === hyphenate(key))
-        ) {
-          setProp(key, true)
-        }
-      }
-      // runtime validation
-      if (__DEV__ && rawProps) {
-        let rawValue
-        if (!(key in rawProps) && hyphenate(key) in rawProps) {
-          rawValue = rawProps[hyphenate(key)]
+  instance.attrs = attrs
+}
+
+export function updateProps(
+  instance: ComponentInternalInstance,
+  rawProps: Data | null,
+  rawPrevProps: Data | null,
+  optimized: boolean
+) {
+  const {
+    props,
+    attrs,
+    vnode: { patchFlag }
+  } = instance
+  const rawCurrentProps = toRaw(props)
+  const [options] = normalizePropsOptions(instance.type)
+
+  if ((optimized || patchFlag > 0) && !(patchFlag & PatchFlags.FULL_PROPS)) {
+    if (patchFlag & PatchFlags.PROPS) {
+      // Compiler-generated props & no keys change, just set the updated
+      // the props.
+      const propsToUpdate = instance.vnode.dynamicProps!
+      for (let i = 0; i < propsToUpdate.length; i++) {
+        const key = propsToUpdate[i]
+        // PROPS flag guarantees rawProps to be non-null
+        const value = rawProps![key]
+        if (options) {
+          // attr / props separation was done on init and will be consistent
+          // in this code path, so just check if attrs have it.
+          if (hasOwn(attrs, key)) {
+            attrs[key] = value
+          } else {
+            const camelizedKey = camelize(key)
+            props[camelizedKey] = resolvePropValue(
+              options,
+              rawCurrentProps,
+              camelizedKey,
+              value
+            )
+          }
         } else {
-          rawValue = rawProps[key]
+          attrs[key] = value
         }
-        validateProp(key, toRaw(rawValue), opt, isAbsent)
       }
     }
   } else {
-    // if component has no declared props, $attrs === $props
-    attrs = props
-  }
-
-  // in case of dynamic props, check if we need to delete keys from
-  // the props proxy
-  const { patchFlag } = instance.vnode
-  if (
-    propsProxy !== null &&
-    (patchFlag === 0 || patchFlag & PatchFlags.FULL_PROPS)
-  ) {
-    const rawInitialProps = toRaw(propsProxy)
-    for (const key in rawInitialProps) {
-      if (!hasOwn(props, key)) {
-        delete propsProxy[key]
+    // full props update.
+    setFullProps(instance, rawProps, props, attrs)
+    // in case of dynamic props, check if we need to delete keys from
+    // the props object
+    let kebabKey: string
+    for (const key in rawCurrentProps) {
+      if (
+        !rawProps ||
+        // for camelCase
+        (!hasOwn(rawProps, key) &&
+          // it's possible the original props was passed in as kebab-case
+          // and converted to camelCase (#955)
+          ((kebabKey = hyphenate(key)) === key || !hasOwn(rawProps, kebabKey)))
+      ) {
+        if (options) {
+          if (
+            rawPrevProps &&
+            // for camelCase
+            (rawPrevProps[key] !== undefined ||
+              // for kebab-case
+              rawPrevProps[kebabKey!] !== undefined)
+          ) {
+            props[key] = resolvePropValue(
+              options,
+              rawProps || EMPTY_OBJ,
+              key,
+              undefined
+            )
+          }
+        } else {
+          delete props[key]
+        }
+      }
+    }
+    // in the case of functional component w/o props declaration, props and
+    // attrs point to the same object so it should already have been updated.
+    if (attrs !== rawCurrentProps) {
+      for (const key in attrs) {
+        if (!rawProps || !hasOwn(rawProps, key)) {
+          delete attrs[key]
+        }
       }
     }
   }
 
-  // lock readonly
-  lock()
+  // trigger updates for $attrs in case it's used in component slots
+  trigger(instance, TriggerOpTypes.SET, '$attrs')
 
-  instance.props = props
-  instance.attrs = options ? attrs || EMPTY_OBJ : props
+  if (__DEV__ && rawProps) {
+    validateProps(props, instance.type)
+  }
 }
 
-const normalizationMap = new WeakMap()
+function setFullProps(
+  instance: ComponentInternalInstance,
+  rawProps: Data | null,
+  props: Data,
+  attrs: Data
+) {
+  const [options, needCastKeys] = normalizePropsOptions(instance.type)
+  if (rawProps) {
+    for (const key in rawProps) {
+      const value = rawProps[key]
+      // key, ref are reserved and never passed down
+      if (isReservedProp(key)) {
+        continue
+      }
+      // prop option names are camelized during normalization, so to support
+      // kebab -> camel conversion here we need to camelize the key.
+      let camelKey
+      if (options && hasOwn(options, (camelKey = camelize(key)))) {
+        props[camelKey] = value
+      } else if (!isEmitListener(instance.type, key)) {
+        // Any non-declared (either as a prop or an emitted event) props are put
+        // into a separate `attrs` object for spreading. Make sure to preserve
+        // original key casing
+        attrs[key] = value
+      }
+    }
+  }
 
-function normalizePropsOptions(
-  raw: ComponentPropsOptions | void
-): NormalizedPropsOptions | null {
-  if (!raw) {
-    return null
+  if (needCastKeys) {
+    const rawCurrentProps = toRaw(props)
+    for (let i = 0; i < needCastKeys.length; i++) {
+      const key = needCastKeys[i]
+      props[key] = resolvePropValue(
+        options!,
+        rawCurrentProps,
+        key,
+        rawCurrentProps[key]
+      )
+    }
   }
-  if (normalizationMap.has(raw)) {
-    return normalizationMap.get(raw)
+}
+
+function resolvePropValue(
+  options: NormalizedPropsOptions[0],
+  props: Data,
+  key: string,
+  value: unknown
+) {
+  const opt = options[key]
+  if (opt != null) {
+    const hasDefault = hasOwn(opt, 'default')
+    // default values
+    if (hasDefault && value === undefined) {
+      const defaultValue = opt.default
+      value =
+        opt.type !== Function && isFunction(defaultValue)
+          ? defaultValue()
+          : defaultValue
+    }
+    // boolean casting
+    if (opt[BooleanFlags.shouldCast]) {
+      if (!hasOwn(props, key) && !hasDefault) {
+        value = false
+      } else if (
+        opt[BooleanFlags.shouldCastTrue] &&
+        (value === '' || value === hyphenate(key))
+      ) {
+        value = true
+      }
+    }
   }
-  const normalized: NormalizedPropsOptions = {}
-  normalizationMap.set(raw, normalized)
+  return value
+}
+
+export function normalizePropsOptions(
+  comp: Component
+): NormalizedPropsOptions | [] {
+  if (comp.__props) {
+    return comp.__props
+  }
+
+  const raw = comp.props
+  const normalized: NormalizedPropsOptions[0] = {}
+  const needCastKeys: NormalizedPropsOptions[1] = []
+
+  // apply mixin/extends props
+  let hasExtends = false
+  if (__FEATURE_OPTIONS_API__ && !isFunction(comp)) {
+    const extendProps = (raw: ComponentOptions) => {
+      const [props, keys] = normalizePropsOptions(raw)
+      extend(normalized, props)
+      if (keys) needCastKeys.push(...keys)
+    }
+    if (comp.extends) {
+      hasExtends = true
+      extendProps(comp.extends)
+    }
+    if (comp.mixins) {
+      hasExtends = true
+      comp.mixins.forEach(extendProps)
+    }
+  }
+
+  if (!raw && !hasExtends) {
+    return (comp.__props = EMPTY_ARR)
+  }
+
   if (isArray(raw)) {
     for (let i = 0; i < raw.length; i++) {
       if (__DEV__ && !isString(raw[i])) {
         warn(`props must be strings when using array syntax.`, raw[i])
       }
       const normalizedKey = camelize(raw[i])
-      if (normalizedKey[0] !== '$') {
+      if (validatePropName(normalizedKey)) {
         normalized[normalizedKey] = EMPTY_OBJ
-      } else if (__DEV__) {
-        warn(`Invalid prop name: "${normalizedKey}" is a reserved property.`)
       }
     }
-  } else {
+  } else if (raw) {
     if (__DEV__ && !isObject(raw)) {
       warn(`invalid props options`, raw)
     }
     for (const key in raw) {
       const normalizedKey = camelize(key)
-      if (normalizedKey[0] !== '$') {
+      if (validatePropName(normalizedKey)) {
         const opt = raw[key]
         const prop: NormalizedProp = (normalized[normalizedKey] =
           isArray(opt) || isFunction(opt) ? { type: opt } : opt)
-        if (prop != null) {
+        if (prop) {
           const booleanIndex = getTypeIndex(Boolean, prop.type)
           const stringIndex = getTypeIndex(String, prop.type)
           prop[BooleanFlags.shouldCast] = booleanIndex > -1
-          prop[BooleanFlags.shouldCastTrue] = booleanIndex < stringIndex
+          prop[BooleanFlags.shouldCastTrue] =
+            stringIndex < 0 || booleanIndex < stringIndex
+          // if the prop needs boolean casting or default value
+          if (booleanIndex > -1 || hasOwn(prop, 'default')) {
+            needCastKeys.push(normalizedKey)
+          }
         }
-      } else if (__DEV__) {
-        warn(`Invalid prop name: "${normalizedKey}" is a reserved property.`)
       }
     }
   }
-  return normalized
+  const normalizedEntry: NormalizedPropsOptions = [normalized, needCastKeys]
+  comp.__props = normalizedEntry
+  return normalizedEntry
 }
 
 // use function string name to check type constructors
@@ -267,17 +402,40 @@ function getTypeIndex(
         return i
       }
     }
-  } else if (isObject(expectedTypes)) {
+  } else if (isFunction(expectedTypes)) {
     return isSameType(expectedTypes, type) ? 0 : -1
   }
   return -1
 }
 
-type AssertionResult = {
-  valid: boolean
-  expectedType: string
+/**
+ * dev only
+ */
+function validateProps(props: Data, comp: Component) {
+  const rawValues = toRaw(props)
+  const options = normalizePropsOptions(comp)[0]
+  for (const key in options) {
+    let opt = options[key]
+    if (opt == null) continue
+    validateProp(key, rawValues[key], opt, !hasOwn(rawValues, key))
+  }
 }
 
+/**
+ * dev only
+ */
+function validatePropName(key: string) {
+  if (key[0] !== '$') {
+    return true
+  } else if (__DEV__) {
+    warn(`Invalid prop name: "${key}" is a reserved property.`)
+  }
+  return false
+}
+
+/**
+ * dev only
+ */
 function validateProp(
   name: string,
   value: unknown,
@@ -320,6 +478,14 @@ const isSimpleType = /*#__PURE__*/ makeMap(
   'String,Number,Boolean,Function,Symbol'
 )
 
+type AssertionResult = {
+  valid: boolean
+  expectedType: string
+}
+
+/**
+ * dev only
+ */
 function assertType(value: unknown, type: PropConstructor): AssertionResult {
   let valid
   const expectedType = getType(type)
@@ -343,6 +509,9 @@ function assertType(value: unknown, type: PropConstructor): AssertionResult {
   }
 }
 
+/**
+ * dev only
+ */
 function getInvalidTypeMessage(
   name: string,
   value: unknown,
@@ -371,6 +540,9 @@ function getInvalidTypeMessage(
   return message
 }
 
+/**
+ * dev only
+ */
 function styleValue(value: unknown, type: string): string {
   if (type === 'String') {
     return `"${value}"`
@@ -381,11 +553,17 @@ function styleValue(value: unknown, type: string): string {
   }
 }
 
+/**
+ * dev only
+ */
 function isExplicable(type: string): boolean {
   const explicitTypes = ['string', 'number', 'boolean']
   return explicitTypes.some(elem => type.toLowerCase() === elem)
 }
 
+/**
+ * dev only
+ */
 function isBoolean(...args: string[]): boolean {
   return args.some(elem => elem.toLowerCase() === 'boolean')
 }

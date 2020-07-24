@@ -3,41 +3,39 @@
  * @Date: 2019-10-15 12:42:16
  * @Description: reactive 函数
  * @Description： vue3.0实现响应式的核心函数
- * @LastEditTime: 2019-12-01 11:21:05
+ * @LastEditTime: 2020-07-24 18:34:11
  */
-import { isObject, toRawType } from '@vue/shared'
+import { isObject, toRawType, def, hasOwn, makeMap } from '@vue/shared'
 import {
   mutableHandlers,
   readonlyHandlers,
-  readonlyPropsHandlers
+  shallowReactiveHandlers,
+  shallowReadonlyHandlers
 } from './baseHandlers'
 import {
   mutableCollectionHandlers,
-  readonlyCollectionHandlers
+  readonlyCollectionHandlers,
+  shallowCollectionHandlers
 } from './collectionHandlers'
-import { ReactiveEffect } from './effect'
 import { UnwrapRef, Ref } from './ref'
-import { makeMap } from '@vue/shared'
 
-// The main WeakMap that stores {target -> key -> dep} connections.
-// Conceptually, it's easier to think of a dependency as a Dep class
-// which maintains a Set of subscribers, but we simply store them as
-// raw Sets to reduce memory overhead.
-export type Dep = Set<ReactiveEffect>
-export type KeyToDepMap = Map<any, Dep>
-export const targetMap = new WeakMap<any, KeyToDepMap>()
+export const enum ReactiveFlags {
+  SKIP = '__v_skip',
+  IS_REACTIVE = '__v_isReactive',
+  IS_READONLY = '__v_isReadonly',
+  RAW = '__v_raw',
+  REACTIVE = '__v_reactive',
+  READONLY = '__v_readonly'
+}
 
-// WeakMaps that store {raw <-> observed} pairs.
-// https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
-const rawToReactive = new WeakMap<any, any>()
-const reactiveToRaw = new WeakMap<any, any>()
-const rawToReadonly = new WeakMap<any, any>()
-const readonlyToRaw = new WeakMap<any, any>()
-
-// WeakSets for values that are marked readonly or non-reactive during
-// observable creation.
-const readonlyValues = new WeakSet<any>()
-const nonReactiveValues = new WeakSet<any>()
+interface Target {
+  [ReactiveFlags.SKIP]?: boolean
+  [ReactiveFlags.IS_REACTIVE]?: boolean
+  [ReactiveFlags.IS_READONLY]?: boolean
+  [ReactiveFlags.RAW]?: any
+  [ReactiveFlags.REACTIVE]?: any
+  [ReactiveFlags.READONLY]?: any
+}
 
 // https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Set
 const collectionTypes = new Set<Function>([Set, Map, WeakMap, WeakSet])
@@ -45,17 +43,11 @@ const isObservableType = /*#__PURE__*/ makeMap(
   'Object,Array,Map,Set,WeakMap,WeakSet'
 )
 
-/**
- * @description: 是否能被Observe
- * @param {value} 任意值
- * @return: boolean
- */
-const canObserve = (value: any): boolean => {
+const canObserve = (value: Target): boolean => {
   return (
-    !value._isVue &&
-    !value._isVNode &&
+    !value[ReactiveFlags.SKIP] &&
     isObservableType(toRawType(value)) &&
-    !nonReactiveValues.has(value)
+    !Object.isFrozen(value)
   )
 }
 
@@ -71,77 +63,80 @@ type UnwrapNestedRefs<T> = T extends Ref ? T : UnwrapRef<T>
 export function reactive<T extends object>(target: T): UnwrapNestedRefs<T>
 export function reactive(target: object) {
   // if trying to observe a readonly proxy, return the readonly version.
-  if (readonlyToRaw.has(target)) {
+  if (target && (target as Target)[ReactiveFlags.IS_READONLY]) {
     return target
-  }
-  // target is explicitly marked as readonly by user
-  if (readonlyValues.has(target)) {
-    return readonly(target)
   }
   return createReactiveObject(
     target,
-    rawToReactive,
-    reactiveToRaw,
+    false,
     mutableHandlers,
     mutableCollectionHandlers
   )
 }
 
-/**
- * @description: 只读
- * @param {type} T extends object
- * @return: 只读类型
- */
-export function readonly<T extends object>(
-  target: T
-): Readonly<UnwrapNestedRefs<T>> {
-  // value is a mutable observable, retrieve its original and return
-  // a readonly version.
-  if (reactiveToRaw.has(target)) {
-    target = reactiveToRaw.get(target)
-  }
+// Return a reactive-copy of the original object, where only the root level
+// properties are reactive, and does NOT unwrap refs nor recursively convert
+// returned properties.
+export function shallowReactive<T extends object>(target: T): T {
   return createReactiveObject(
     target,
-    rawToReadonly,
-    readonlyToRaw,
+    false,
+    shallowReactiveHandlers,
+    shallowCollectionHandlers
+  )
+}
+
+type Primitive = string | number | boolean | bigint | symbol | undefined | null
+type Builtin = Primitive | Function | Date | Error | RegExp
+export type DeepReadonly<T> = T extends Builtin
+  ? T
+  : T extends Map<infer K, infer V>
+    ? ReadonlyMap<DeepReadonly<K>, DeepReadonly<V>>
+    : T extends ReadonlyMap<infer K, infer V>
+      ? ReadonlyMap<DeepReadonly<K>, DeepReadonly<V>>
+      : T extends WeakMap<infer K, infer V>
+        ? WeakMap<DeepReadonly<K>, DeepReadonly<V>>
+        : T extends Set<infer U>
+          ? ReadonlySet<DeepReadonly<U>>
+          : T extends ReadonlySet<infer U>
+            ? ReadonlySet<DeepReadonly<U>>
+            : T extends WeakSet<infer U>
+              ? WeakSet<DeepReadonly<U>>
+              : T extends Promise<infer U>
+                ? Promise<DeepReadonly<U>>
+                : T extends {}
+                  ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+                  : Readonly<T>
+
+export function readonly<T extends object>(
+  target: T
+): DeepReadonly<UnwrapNestedRefs<T>> {
+  return createReactiveObject(
+    target,
+    true,
     readonlyHandlers,
     readonlyCollectionHandlers
   )
 }
 
-// ProxyHandler
-// https://developer.mozilla.org/zh-CN/docs/Web/JavaScript/Reference/Global_Objects/Proxy/handler
-
-/**
- * @description: 创建Reactive对象
- * @param {target} any
- * @param {toProxy} WeakMap<any, any> 用于保存原始数据
- * @param {toRaw} WeakMap<any, any> 用于保存可响应数据
- * @param {baseHandlers} ProxyHandler<any>
- * @param {collectionHandlers} ProxyHandler<any>
- * @return:
- */
-// @internal
-// Return a readonly-copy of a props object, without unwrapping refs at the root
-// level. This is intended to allow explicitly passing refs as props.
-// Technically this should use different global cache from readonly(), but
-// since it is only used on internal objects so it's not really necessary.
-export function readonlyProps<T extends object>(
+// Return a reactive-copy of the original object, where only the root level
+// properties are readonly, and does NOT unwrap refs nor recursively convert
+// returned properties.
+// This is used for creating the props proxy object for stateful components.
+export function shallowReadonly<T extends object>(
   target: T
 ): Readonly<{ [K in keyof T]: UnwrapNestedRefs<T[K]> }> {
   return createReactiveObject(
     target,
-    rawToReadonly,
-    readonlyToRaw,
-    readonlyPropsHandlers,
+    true,
+    shallowReadonlyHandlers,
     readonlyCollectionHandlers
   )
 }
 
 function createReactiveObject(
-  target: unknown,
-  toProxy: WeakMap<any, any>,
-  toRaw: WeakMap<any, any>,
+  target: Target,
+  isReadonly: boolean,
   baseHandlers: ProxyHandler<any>,
   collectionHandlers: ProxyHandler<any>
 ) {
@@ -152,37 +147,31 @@ function createReactiveObject(
     }
     return target
   }
-  // target already has corresponding Proxy
-  // 如果target 已经存在在相应的代理中则返回
-  let observed = toProxy.get(target)
-  // 不为undefined 时返回observed
-  if (observed !== void 0) {
-    return observed
-  }
-  // target is already a Proxy
-  // 如果target已经在代理中同样返回
-  if (toRaw.has(target)) {
+  // target is already a Proxy, return it.
+  // exception: calling readonly() on a reactive object
+  if (
+    target[ReactiveFlags.RAW] &&
+    !(isReadonly && target[ReactiveFlags.IS_REACTIVE])
+  ) {
     return target
+  }
+  // target already has corresponding Proxy
+  const reactiveFlag = isReadonly
+    ? ReactiveFlags.READONLY
+    : ReactiveFlags.REACTIVE
+  if (hasOwn(target, reactiveFlag)) {
+    return target[reactiveFlag]
   }
   // only a whitelist of value types can be observed.
   // 如果target并不能被observe 则返回
   if (!canObserve(target)) {
     return target
   }
-
-  // 如果collectionTypes继承于target，handlers为collectionHandlers
-  // 不存在的话handlers为baseHandlers
-  const handlers = collectionTypes.has(target.constructor)
-    ? collectionHandlers
-    : baseHandlers
-
-  // 创建一个Proxy对象
-  observed = new Proxy(target, handlers)
-  toProxy.set(target, observed)
-  toRaw.set(observed, target)
-  if (!targetMap.has(target)) {
-    targetMap.set(target, new Map())
-  }
+  const observed = new Proxy(
+    target,
+    collectionTypes.has(target.constructor) ? collectionHandlers : baseHandlers
+  )
+  def(target, reactiveFlag, observed)
   return observed
 }
 
@@ -192,7 +181,10 @@ function createReactiveObject(
  * @return: boolean
  */
 export function isReactive(value: unknown): boolean {
-  return reactiveToRaw.has(value) || readonlyToRaw.has(value)
+  if (isReadonly(value)) {
+    return isReactive((value as Target)[ReactiveFlags.RAW])
+  }
+  return !!(value && (value as Target)[ReactiveFlags.IS_REACTIVE])
 }
 
 /**
@@ -201,34 +193,20 @@ export function isReactive(value: unknown): boolean {
  * @return: boolean
  */
 export function isReadonly(value: unknown): boolean {
-  return readonlyToRaw.has(value)
+  return !!(value && (value as Target)[ReactiveFlags.IS_READONLY])
 }
 
-/**
- * @description: 获取 === get
- * @param {observed} T
- * @return: T
- */
+export function isProxy(value: unknown): boolean {
+  return isReactive(value) || isReadonly(value)
+}
+
 export function toRaw<T>(observed: T): T {
-  return reactiveToRaw.get(observed) || readonlyToRaw.get(observed) || observed
+  return (
+    (observed && toRaw((observed as Target)[ReactiveFlags.RAW])) || observed
+  )
 }
 
-/**
- * @description: 添加只读属性
- * @param {value}  T
- * @return: T
- */
-export function markReadonly<T>(value: T): T {
-  readonlyValues.add(value)
-  return value
-}
-
-/**
- * @description: 为nonReactiveValues 添加值
- * @param {value} T
- * @return: T
- */
-export function markNonReactive<T>(value: T): T {
-  nonReactiveValues.add(value)
+export function markRaw<T extends object>(value: T): T {
+  def(value, ReactiveFlags.SKIP, true)
   return value
 }
