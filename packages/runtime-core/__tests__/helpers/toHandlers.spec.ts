@@ -1,5 +1,5 @@
 import { toHandlers } from '../../src/helpers/toHandlers'
-import { mockWarn } from '@vue/runtime-test'
+import { mockWarn } from '@vue/shared'
 
 describe('toHandlers', () => {
   mockWarn()
@@ -18,8 +18,8 @@ describe('toHandlers', () => {
     const change = () => {}
 
     expect(toHandlers({ input, change })).toStrictEqual({
-      oninput: input,
-      onchange: change
+      onInput: input,
+      onChange: change
     })
   })
 })

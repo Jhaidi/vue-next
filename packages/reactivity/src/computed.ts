@@ -1,16 +1,18 @@
-import { effect, ReactiveEffect, effectStack } from './effect'
-import { Ref, UnwrapRef } from './ref'
+import { effect, ReactiveEffect, trigger, track } from './effect'
+import { TriggerOpTypes, TrackOpTypes } from './operations'
+import { Ref } from './ref'
 import { isFunction, NOOP } from '@vue/shared'
+import { ReactiveFlags } from './reactive'
 
 export interface ComputedRef<T = any> extends WritableComputedRef<T> {
-  readonly value: UnwrapRef<T>
+  readonly value: T
 }
 
 export interface WritableComputedRef<T> extends Ref<T> {
   readonly effect: ReactiveEffect<T>
 }
 
-export type ComputedGetter<T> = () => T
+export type ComputedGetter<T> = (ctx?: any) => T
 export type ComputedSetter<T> = (v: T) => void
 
 export interface WritableComputedOptions<T> {
@@ -42,17 +44,22 @@ export function computed<T>(
 
   let dirty = true
   let value: T
+  let computed: ComputedRef<T>
 
   const runner = effect(getter, {
     lazy: true,
-    // mark effect as computed so that it gets priority during trigger
-    computed: true,
     scheduler: () => {
-      dirty = true
+      if (!dirty) {
+        dirty = true
+        trigger(computed, TriggerOpTypes.SET, 'value')
+      }
     }
   })
-  return {
-    _isRef: true,
+  computed = {
+    __v_isRef: true,
+    [ReactiveFlags.IS_READONLY]:
+      isFunction(getterOrOptions) || !getterOrOptions.set,
+
     // expose effect so computed can be stopped
     effect: runner,
     get value() {
@@ -60,28 +67,12 @@ export function computed<T>(
         value = runner()
         dirty = false
       }
-      // When computed effects are accessed in a parent effect, the parent
-      // should track all the dependencies the computed property has tracked.
-      // This should also apply for chained computed properties.
-      trackChildRun(runner)
+      track(computed, TrackOpTypes.GET, 'value')
       return value
     },
     set value(newValue: T) {
       setter(newValue)
     }
   } as any
-}
-
-function trackChildRun(childRunner: ReactiveEffect) {
-  if (effectStack.length === 0) {
-    return
-  }
-  const parentRunner = effectStack[effectStack.length - 1]
-  for (let i = 0; i < childRunner.deps.length; i++) {
-    const dep = childRunner.deps[i]
-    if (!dep.has(parentRunner)) {
-      dep.add(parentRunner)
-      parentRunner.deps.push(dep)
-    }
-  }
+  return computed
 }
